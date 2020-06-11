@@ -3,9 +3,56 @@
 
 import Combine
 
+struct Event<T> {
+    let new: T
+    let previous: T?
+}
+
+///Similar to PassthroughSubject and CurrentValueSubject, Signal<T> provides a bridge between the Imperative and Reactive worlds. The difference is where Passthrough Subject is ephemeral, and CurrentValueSubject is stateful with respect to a single value (ie. you can query CurrentValueSubject at any moment to learn the current 'state'), Signal remembers not just the current state, but the previous state as well, up to a time history depth of (t - 1)
+///
+///Signal<T> may be instantiated with no values, only a current value, or a current & a previous value. This allows flexibility for use in situations where sensible initial value(s) are or are not available.
+///
+///As a Publisher, Signal<T> will emit values every time `update(_ value)` is called, regardless of whether or not it was initialized with one or more values.
+///
+///Whether or not you think it's cheating to "remember" a portion of a stream's history (in this case merely the most recently emitted value alone), this abstraction still allows for Functional Programming purity, as the `Event<T>` emitted is a pure value type, eminently suitable for pure functional computation.
+final class Signal<T>: Publisher {
+    typealias Output = Event<T>
+    typealias Failure = Never
+    
+    private var subscribers: Array<AnySubscriber<Event<T>, Never>> = []
+    func receive<S>(subscriber: S) where S : Subscriber, Never == S.Failure, Event<T> == S.Input { subscribers.append(AnySubscriber(subscriber)) }
+    
+    private(set) var currentValue: T?
+    private(set) var previousValue: T?
+    func update(_ newValue: T) {
+        let event = Event<T>(new: newValue, previous: currentValue)
+        
+        subscribers.enumerated().forEach{
+            let demand = $0.element.receive(event)
+            if demand == .none, demand.max == 0 {
+                $0.element.receive(completion: .finished)
+                subscribers.remove(at: $0.offset)
+            }
+        }
+        
+        self.previousValue = self.currentValue
+        self.currentValue = newValue
+    }
+    
+    init(current: T? = nil, previous: T? = nil) {
+        self.currentValue = current
+        self.previousValue = previous
+    }
+    
+    deinit {
+        subscribers.forEach{ $0.receive(completion: .finished) }
+        subscribers = []
+    }
+}
+
 protocol ReactiveElement {
     associatedtype Model
-    var state: CurrentValueSubject<Model,Never> { get }
+    var state: Signal<Model> { get }
     
     associatedtype UpstreamModel
     func react(toNew: UpstreamModel)
@@ -27,11 +74,13 @@ protocol ReactiveRenderer {
 }
 
 ///Concrete Type which allows us to realize the familiar h = f ∘ g `composition` operator
+///
+///Composes two ReactiveElements into a single ReactiveElement
 struct Composite<U: ReactiveElement, M: ReactiveElement>: ReactiveElement where U.Model == M.UpstreamModel {
     typealias Model = M.Model
     typealias UpstreamModel = U.UpstreamModel
     
-    let state: CurrentValueSubject<M.Model, Never>
+    let state: Signal<Model>
     let upstream: U
     let downstream: M
     
@@ -40,9 +89,9 @@ struct Composite<U: ReactiveElement, M: ReactiveElement>: ReactiveElement where 
         self.downstream = downstream
         state = downstream.state
         
-        upstream.state.sink{
-            downstream.react(toNew: $0)
-            //TODO: Diffable dance
+        upstream.state.sink{ event in
+            downstream.react(toNew: event.new)
+            event.previous.flatMap{ downstream.react(toNew: event.new, withPrevious: $0) }
         }
         //TODO: store the AnyCancellable in an appropriate place
     }
@@ -51,18 +100,22 @@ struct Composite<U: ReactiveElement, M: ReactiveElement>: ReactiveElement where 
     func react(toNew: U.UpstreamModel, withPrevious: U.UpstreamModel) { upstream.react(toNew: toNew, withPrevious: withPrevious) }
 }
 
+///Concrete Type which allows us to realize the familiar covariant functor, more commonly known as `map`
 class Mapped<U: ReactiveElement,V>: ReactiveElement {
     typealias Model = V
     typealias UpstreamModel = U.UpstreamModel
     
-    let state: CurrentValueSubject<V, Never>
+    let state: Signal<Model>
     let upstream: U
     
     init(_ upstream: U, map: @escaping (U.Model) -> V) {
         self.upstream = upstream
-        state = CurrentValueSubject(map(upstream.state.value))
+        let mappedCurrent = upstream.state.currentValue.flatMap{ map($0) }
+        let mappedPrevious = upstream.state.previousValue.flatMap{ map($0) }
+        state = Signal<Model>(current: mappedCurrent, previous: mappedPrevious)
         
-        upstream.state.sink{ self.state.send(map($0)) }
+        upstream.state
+            .sink{ self.state.update(map($0.new)) }
         //TODO: store the AnyCancellable in an appropriate place
     }
     
@@ -91,8 +144,9 @@ func ~>> <Source: ReactiveElement, Output: ReactiveElement,T,V>(lhs: Source, rhs
 
 ///Subscribe a terminating element to a reactive stream, returning the reified output.
 func ~>> <Source: ReactiveElement, Renderer: ReactiveRenderer>(lhs: Source, rhs: Renderer) -> Renderer.Output where Source.Model == Renderer.UpstreamModel {
-    lhs.state.sink{
-        rhs.react(toNew: $0)
+    lhs.state.sink{ event in
+        rhs.react(toNew: event.new)
+        event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
     }
     //TODO: store the AnyCancellable in an appropriate place
 
@@ -101,115 +155,11 @@ func ~>> <Source: ReactiveElement, Renderer: ReactiveRenderer>(lhs: Source, rhs:
 
 
 
-struct Event<T> {
-    let new: T
-    let previous: T?
-}
-
-final class Signal<T>: Publisher {
-    typealias Output = Event<T>
-    typealias Failure = Never
-    
-    private var subscribers: Array<AnySubscriber<Event<T>, Never>> = []
-    func receive<S>(subscriber: S) where S : Subscriber, Never == S.Failure, Event<T> == S.Input { subscribers.append(subscriber) }
-    
-    private(set) var currentValue: T?
-    private(set) var previousValue: T?
-    func update(_ value: T) {
-        let event = Event<T>(new: value, previous: current)
-        
-        subscribers.enumerated().forEach{
-            let demand = $0.element.receive(event)
-            if demand == none, demand.max == 0 {
-                $0.element.receive(completion: .finished)
-                subscribers.remove(at: $0.offset)
-            }
-        }
-        
-        self.previousValue = self.currentValue
-        self.currentValue = value
-    }
-    
-    init(current: T? = nil, previous: T? = nil) {
-        self.currentValue = current
-        self.previousValue = previous
-    }
-    
-    deinit {
-        subscribers.forEach{ $0.receive(completion: .finished) }
-        subscribers = []
-    }
-}
-
-//final class Thing: Subscription {
-//    func request(_ demand: Subscribers.Demand) {
-//        <#code#>
-//    }
-//
-//    func cancel() {
-//        <#code#>
-//    }
-//
-//
-//}
 
 
 
 
-//The subscription can be my resevoir of state
-final class LookbackSubscripton<S: Subscriber, T>: Subscription {
-    func request(_ demand: Subscribers.Demand) {
-        
-    }
-    
-    func cancel() {
-        
-    }
-}
-
-//So Subject is just a publisher exposing the send method
-class LookbackPublisher<T>: Publisher {
-    func receive<S>(subscriber: S) where S : Subscriber, Never == S.Failure, T == S.Input {
-        
-    }
-    
-    func send(_ value: T) {
-        
-    }
-        
-    
-    typealias Output = T
-    typealias Failure = Never
-    
-}
-
-
-//class LookbackValueSubject<T>: Subject {
-//    func send(_ value: (previous: T, current: T)) {
-//        <#code#>
-//    }
-//
-//    func send(completion: Subscribers.Completion<Never>) {
-//        <#code#>
-//    }
-//
-//    func send(subscription: Subscription) {
-//        <#code#>
-//    }
-//
-//    func receive<S>(subscriber: S) where S : Subscriber, Never == S.Failure, Self.Output == S.Input {
-//        <#code#>
-//    }
-//
-//    typealias Output = (previous: T, current: T)
-//    typealias Failure = Never
-//
-//    private var
-//
-//}
-
-
-// 1. Make a DiffableValueSubject that does the CurrentValueSubject dance but holds the previous state too. This guy will get used everywhere!
+//  <Done!> 1. Make a DiffableValueSubject that does the CurrentValueSubject dance but holds the previous state too. This guy will get used everywhere!
 
 // 2. Global implicit redux store
 
