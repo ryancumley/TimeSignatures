@@ -101,6 +101,113 @@ func ~>> <Source: ReactiveElement, Renderer: ReactiveRenderer>(lhs: Source, rhs:
 
 
 
+struct Event<T> {
+    let new: T
+    let previous: T?
+}
+
+final class Signal<T>: Publisher {
+    typealias Output = Event<T>
+    typealias Failure = Never
+    
+    private var subscribers: Array<AnySubscriber<Event<T>, Never>> = []
+    func receive<S>(subscriber: S) where S : Subscriber, Never == S.Failure, Event<T> == S.Input { subscribers.append(subscriber) }
+    
+    private(set) var currentValue: T?
+    private(set) var previousValue: T?
+    func update(_ value: T) {
+        let event = Event<T>(new: value, previous: current)
+        
+        subscribers.enumerated().forEach{
+            let demand = $0.element.receive(event)
+            if demand == none, demand.max == 0 {
+                $0.element.receive(completion: .finished)
+                subscribers.remove(at: $0.offset)
+            }
+        }
+        
+        self.previousValue = self.currentValue
+        self.currentValue = value
+    }
+    
+    init(current: T? = nil, previous: T? = nil) {
+        self.currentValue = current
+        self.previousValue = previous
+    }
+    
+    deinit {
+        subscribers.forEach{ $0.receive(completion: .finished) }
+        subscribers = []
+    }
+}
+
+//final class Thing: Subscription {
+//    func request(_ demand: Subscribers.Demand) {
+//        <#code#>
+//    }
+//
+//    func cancel() {
+//        <#code#>
+//    }
+//
+//
+//}
+
+
+
+
+//The subscription can be my resevoir of state
+final class LookbackSubscripton<S: Subscriber, T>: Subscription {
+    func request(_ demand: Subscribers.Demand) {
+        
+    }
+    
+    func cancel() {
+        
+    }
+}
+
+//So Subject is just a publisher exposing the send method
+class LookbackPublisher<T>: Publisher {
+    func receive<S>(subscriber: S) where S : Subscriber, Never == S.Failure, T == S.Input {
+        
+    }
+    
+    func send(_ value: T) {
+        
+    }
+        
+    
+    typealias Output = T
+    typealias Failure = Never
+    
+}
+
+
+//class LookbackValueSubject<T>: Subject {
+//    func send(_ value: (previous: T, current: T)) {
+//        <#code#>
+//    }
+//
+//    func send(completion: Subscribers.Completion<Never>) {
+//        <#code#>
+//    }
+//
+//    func send(subscription: Subscription) {
+//        <#code#>
+//    }
+//
+//    func receive<S>(subscriber: S) where S : Subscriber, Never == S.Failure, Self.Output == S.Input {
+//        <#code#>
+//    }
+//
+//    typealias Output = (previous: T, current: T)
+//    typealias Failure = Never
+//
+//    private var
+//
+//}
+
 
 // 1. Make a DiffableValueSubject that does the CurrentValueSubject dance but holds the previous state too. This guy will get used everywhere!
 
