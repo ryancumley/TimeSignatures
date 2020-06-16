@@ -83,7 +83,9 @@ struct Composite<U: ReactiveElement, M: ReactiveElement>: ReactiveElement where 
     let state: Signal<Model>
     let upstream: U
     let downstream: M
-    
+
+    private var cancelToken: Set<AnyCancellable>
+
     init(_ upstream: U, downstream: M) {
         self.upstream = upstream
         self.downstream = downstream
@@ -92,21 +94,52 @@ struct Composite<U: ReactiveElement, M: ReactiveElement>: ReactiveElement where 
         upstream.state.sink{ event in
             downstream.react(toNew: event.new)
             event.previous.flatMap{ downstream.react(toNew: event.new, withPrevious: $0) }
+                //subscribe the global store here too
         }
-        //TODO: store the AnyCancellable in an appropriate place
+        .store(in: &cancelToken)
     }
-    
+
     func react(toNew: U.UpstreamModel) { upstream.react(toNew: toNew) }
     func react(toNew: U.UpstreamModel, withPrevious: U.UpstreamModel) { upstream.react(toNew: toNew, withPrevious: withPrevious) }
 }
 
-///Concrete Type which allows us to realize the familiar covariant functor, more commonly known as `map`
-class Mapped<U: ReactiveElement,V>: ReactiveElement {
+//struct Leaf<U: ReactiveElement, M: ReactiveRenderer,O>: M.Output where U.Model == M.UpstreamModel {
+//    typealias Model = M.Model
+//    typealias UpstreamModel = U.UpstreamModel
+//
+//    let state: Signal<Model>
+//    let upstream: U
+//    let downstream: M
+//
+//    private let cancelToken: AnyCancellable
+//
+//    init(_ upstream: U, downstream: M) {
+//        self.upstream = upstream
+//        self.downstream = downstream
+//        state = downstream.state
+//
+//        upstream.state.sink{ event in
+//                downstream.react(toNew: event.new)
+//                event.previous.flatMap{ downstream.react(toNew: event.new, withPrevious: $0) }
+//                //subscribe the global store here too
+//            }
+//            .store(in: &cancelToken)
+//    }
+//
+//    func react(toNew: U.UpstreamModel) { upstream.react(toNew: toNew) }
+//    func react(toNew: U.UpstreamModel, withPrevious: U.UpstreamModel) { upstream.react(toNew: toNew, withPrevious: withPrevious) }
+//}
+
+
+///Concrete Type which allows us to realize the familiar covariant functor
+struct Mapped<U: ReactiveElement,V>: ReactiveElement {
     typealias Model = V
     typealias UpstreamModel = U.UpstreamModel
     
     let state: Signal<Model>
     let upstream: U
+
+    private let cancelToken: Set<AnyCancellable>
     
     init(_ upstream: U, map: @escaping (U.Model) -> V) {
         self.upstream = upstream
@@ -116,7 +149,8 @@ class Mapped<U: ReactiveElement,V>: ReactiveElement {
         
         upstream.state
             .sink{ self.state.update(map($0.new)) }
-        //TODO: store the AnyCancellable in an appropriate place
+            .store(in: &cancelToken)
+            //Do NOT send this event to the global store, since it will only matter when a downstream subscriber receives it
     }
     
     func react(toNew: U.UpstreamModel) { self.upstream.react(toNew: toNew) }
@@ -147,10 +181,16 @@ func ~>> <Source: ReactiveElement, Renderer: ReactiveRenderer>(lhs: Source, rhs:
     lhs.state.sink{ event in
         rhs.react(toNew: event.new)
         event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
+
+        //send this to the global store
     }
     //TODO: store the AnyCancellable in an appropriate place
 
     return rhs.output
+}
+
+struct Thing {
+    let name: String
 }
 
 
