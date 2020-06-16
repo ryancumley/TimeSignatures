@@ -48,6 +48,8 @@ final class Signal<T>: Publisher {
         subscribers.forEach{ $0.receive(completion: .finished) }
         subscribers = []
     }
+    
+    fileprivate let observations = Set<AnyCancellable>()
 }
 
 protocol ReactiveElement {
@@ -63,6 +65,12 @@ extension ReactiveElement where UpstreamModel == () {
     func react(toNew: UpstreamModel) {}
     func react(toNew: UpstreamModel, withPrevious: UpstreamModel) {}
 }
+
+//extension ReactiveElement {
+//    func publisher() -> AnyPublisher<Event<Model>, Never> {
+//        return AnyPublisher(state)
+//    }
+//}
 
 protocol ReactiveRenderer {
     associatedtype Output
@@ -84,7 +92,7 @@ struct Composite<U: ReactiveElement, M: ReactiveElement>: ReactiveElement where 
     let upstream: U
     let downstream: M
 
-    private var cancelToken: Set<AnyCancellable>
+    private var cancelToken = Set<AnyCancellable>()
 
     init(_ upstream: U, downstream: M) {
         self.upstream = upstream
@@ -103,32 +111,27 @@ struct Composite<U: ReactiveElement, M: ReactiveElement>: ReactiveElement where 
     func react(toNew: U.UpstreamModel, withPrevious: U.UpstreamModel) { upstream.react(toNew: toNew, withPrevious: withPrevious) }
 }
 
-//struct Leaf<U: ReactiveElement, M: ReactiveRenderer,O>: M.Output where U.Model == M.UpstreamModel {
-//    typealias Model = M.Model
-//    typealias UpstreamModel = U.UpstreamModel
-//
-//    let state: Signal<Model>
-//    let upstream: U
-//    let downstream: M
-//
-//    private let cancelToken: AnyCancellable
-//
-//    init(_ upstream: U, downstream: M) {
-//        self.upstream = upstream
-//        self.downstream = downstream
-//        state = downstream.state
-//
-//        upstream.state.sink{ event in
-//                downstream.react(toNew: event.new)
-//                event.previous.flatMap{ downstream.react(toNew: event.new, withPrevious: $0) }
-//                //subscribe the global store here too
-//            }
-//            .store(in: &cancelToken)
-//    }
-//
-//    func react(toNew: U.UpstreamModel) { upstream.react(toNew: toNew) }
-//    func react(toNew: U.UpstreamModel, withPrevious: U.UpstreamModel) { upstream.react(toNew: toNew, withPrevious: withPrevious) }
-//}
+struct Leaf<U: ReactiveElement, M: ReactiveRenderer> where U.Model == M.UpstreamModel {
+    let upstream: U
+    let downstream: M
+
+    private var cancelToken = Set<AnyCancellable>()
+
+    init(_ upstream: U, downstream: M) {
+        self.upstream = upstream
+        self.downstream = downstream
+
+        upstream.state.sink{ event in
+                downstream.react(toNew: event.new)
+                event.previous.flatMap{ downstream.react(toNew: event.new, withPrevious: $0) }
+                //subscribe the global store here too
+            }
+            .store(in: &cancelToken)
+    }
+
+    func react(toNew: U.UpstreamModel) { upstream.react(toNew: toNew) }
+    func react(toNew: U.UpstreamModel, withPrevious: U.UpstreamModel) { upstream.react(toNew: toNew, withPrevious: withPrevious) }
+}
 
 
 ///Concrete Type which allows us to realize the familiar covariant functor
@@ -139,17 +142,21 @@ struct Mapped<U: ReactiveElement,V>: ReactiveElement {
     let state: Signal<Model>
     let upstream: U
 
-    private let cancelToken: Set<AnyCancellable>
+    private var cancelToken = Set<AnyCancellable>()
     
-    init(_ upstream: U, map: @escaping (U.Model) -> V) {
+    init(_ upstream: U, map: (U.Model) -> V) {
         self.upstream = upstream
         let mappedCurrent = upstream.state.currentValue.flatMap{ map($0) }
         let mappedPrevious = upstream.state.previousValue.flatMap{ map($0) }
         state = Signal<Model>(current: mappedCurrent, previous: mappedPrevious)
         
-        upstream.state
-            .sink{ self.state.update(map($0.new)) }
-            .store(in: &cancelToken)
+//        let fire: (U.Model) -> () = {
+//            self.state.update(map($0))
+//        }
+        
+//        upstream.state
+//            .sink{ fire($0.new) }
+//            .store(in: &cancelToken)
             //Do NOT send this event to the global store, since it will only matter when a downstream subscriber receives it
     }
     
@@ -165,6 +172,33 @@ precedencegroup ReactiveStreamPrecedence {
 }
 
 infix operator ~>>: ReactiveStreamPrecedence
+
+//Let's see if we can cut out the wrapping structs with Combine types. I think AnyPublisher<> can get me there with the right signature specializations.
+
+// I didn't class constrain the ReactiveElement protocol, so I'm assuming that you are managing the lifecycle of the type you're passing into a stream. However Signal<T> is a class, so I can work with reference semantics
+//Perhaps Signal<T> just needs to expose a store for cancellable tokens or a store for upstream/downstream Signal references? Some interesting ARC consequences here.
+
+///Join two reactive elements together
+func ~>> <S: ReactiveElement, C: ReactiveElement>(lhs: S, rhs: C) -> Signal<C.Model> where S.Model == C.UpstreamModel {
+
+    
+    return rhs.state
+}
+
+func ~>> <S,C: ReactiveElement>(lhs: Signal<S>, rhs: C) -> Signal<C.Model> where S == C.UpstreamModel {
+    
+    
+    
+    return rhs.state
+}
+
+func ~>> <S,C: ReactiveRenderer>(lhs: Signal<S>, rhs: C) -> C.Output where S == C.UpstreamModel {
+    
+    
+    
+    return rhs.output
+}
+
 
 ///Join two reactive elements together
 func ~>> <S: ReactiveElement, C: ReactiveElement, R: ReactiveElement>(lhs: S, rhs: C) -> R where S.Model == C.UpstreamModel, R.Model == C.Model, R.UpstreamModel == S.UpstreamModel {
@@ -187,10 +221,6 @@ func ~>> <Source: ReactiveElement, Renderer: ReactiveRenderer>(lhs: Source, rhs:
     //TODO: store the AnyCancellable in an appropriate place
 
     return rhs.output
-}
-
-struct Thing {
-    let name: String
 }
 
 
