@@ -3,12 +3,19 @@
 
 import Combine
 
+///Similar in most ways to `Element` in the Reactive Streams Specification, an `Event<T>` is the granular/discreet/individual package of data which is "streamed" through the components of a reactive system.
+///
+///While `Event<T>` is a value type, and allows us to realize the RSS's goal of a definitively sequencable series of events passed over asynchronous boundaries; `Event<T>` includes the ability to optionally attach the previously emitted value in the sequence along with the current one. This extra information can be useful in certain situations where the `difference` between current/previous is desired, but a subscriber does not wish to maintain state/history. For example, as a performance optimization where a subscriber only takes action when a value changes, and ignores the event if the new value is the same as the previous.
+///
+///Since this abstraction is still a singular value, we may still exercise all of our familiar Functional Programming toolkits to ensure that every Subscribing Component processes a `well-ordered` sequence of discreet events.
+///
+///However, a clever author could certainly compare what the publisher intended as `previous` with how the events actually arrived over the asynchronous boundary, and construct a valid alternate history/sequence/stream, allowing them to "break" the core abstraction of reactive programming: locally well-ordered sequences. In practice, this is unlikely to cause real problems.
 struct Event<T> {
     let new: T
     let previous: T?
 }
 
-///Similar to PassthroughSubject and CurrentValueSubject, Signal<T> provides a bridge between the Imperative and Reactive worlds. The difference is where Passthrough Subject is ephemeral, and CurrentValueSubject is stateful with respect to a single value (ie. you can query CurrentValueSubject at any moment to learn the current 'state'), Signal remembers not just the current state, but the previous state as well, up to a time history depth of (t - 1)
+///Similar to PassthroughSubject and CurrentValueSubject, Signal<T> provides a bridge between the Imperative and Reactive worlds. The difference is where PassthroughSubject is ephemeral, and CurrentValueSubject is stateful with respect to a single value (ie. you can query CurrentValueSubject at any moment to learn the current 'state'), Signal remembers not just the current state, but the previous state as well, up to a time history depth of (t - 1)
 ///
 ///Signal<T> may be instantiated with no values, only a current value, or a current & a previous value. This allows flexibility for use in situations where sensible initial value(s) are or are not available.
 ///
@@ -53,7 +60,10 @@ final class Signal<T>: Publisher {
     fileprivate var observations = Set<AnyCancellable>()
 }
 
-protocol ReactiveElement {
+///The foundational unit of composition for a reactive system, a `ReactiveComponent` defines & publishes a stream of `Event<Model>`'s; and optionally defines an upstream `Event<Model>` which it subscribes to, as well as how to react to publications of that upstream `Event<Model>`
+///
+///You may use ReactiveComponent as the beginning/origin of a stream by declaring `typealias UpstreamModel = ()`, which makes your component satisfy the "Publisher" component spec from RSS. If both `Model` and `UpstreamModel` are defined, then your component satisfies the `Processor` component spec from RSS, and can be thought of as fitting into the "Middle" of a stream.
+protocol ReactiveComponent {
     associatedtype Model
     var state: Signal<Model> { get }
     
@@ -62,107 +72,18 @@ protocol ReactiveElement {
     func react(toNew: UpstreamModel, withPrevious: UpstreamModel)
 }
 
-extension ReactiveElement where UpstreamModel == () {
+extension ReactiveComponent where UpstreamModel == () {
     func react(toNew: UpstreamModel) {}
     func react(toNew: UpstreamModel, withPrevious: UpstreamModel) {}
 }
 
-//extension ReactiveElement {
-//    func publisher() -> AnyPublisher<Event<Model>, Never> {
-//        return AnyPublisher(state)
-//    }
-//}
-
+///ReactiveRenderers define the "end" of a stream, subscribing to an upstream publisher of `Event<Model>`'s, but do not publish an events of their own.
+///
+///Defining your component as a ReactiveRenderer satisfies the `Subscriber` component spec from RSS
 protocol ReactiveRenderer {
-    associatedtype Output
-    var output: Output { get }
-    
     associatedtype UpstreamModel
     func react(toNew: UpstreamModel)
     func react(toNew: UpstreamModel, withPrevious: UpstreamModel)
-}
-
-///Concrete Type which allows us to realize the familiar h = f ∘ g `composition` operator
-///
-///Composes two ReactiveElements into a single ReactiveElement
-struct Composite<U: ReactiveElement, M: ReactiveElement>: ReactiveElement where U.Model == M.UpstreamModel {
-    typealias Model = M.Model
-    typealias UpstreamModel = U.UpstreamModel
-    
-    let state: Signal<Model>
-    let upstream: U
-    let downstream: M
-
-    private var cancelToken = Set<AnyCancellable>()
-
-    init(_ upstream: U, downstream: M) {
-        self.upstream = upstream
-        self.downstream = downstream
-        state = downstream.state
-        
-        upstream.state.sink{ event in
-            downstream.react(toNew: event.new)
-            event.previous.flatMap{ downstream.react(toNew: event.new, withPrevious: $0) }
-                //subscribe the global store here too
-        }
-        .store(in: &cancelToken)
-    }
-
-    func react(toNew: U.UpstreamModel) { upstream.react(toNew: toNew) }
-    func react(toNew: U.UpstreamModel, withPrevious: U.UpstreamModel) { upstream.react(toNew: toNew, withPrevious: withPrevious) }
-}
-
-struct Leaf<U: ReactiveElement, M: ReactiveRenderer> where U.Model == M.UpstreamModel {
-    let upstream: U
-    let downstream: M
-
-    private var cancelToken = Set<AnyCancellable>()
-
-    init(_ upstream: U, downstream: M) {
-        self.upstream = upstream
-        self.downstream = downstream
-
-        upstream.state.sink{ event in
-                downstream.react(toNew: event.new)
-                event.previous.flatMap{ downstream.react(toNew: event.new, withPrevious: $0) }
-                //subscribe the global store here too
-            }
-            .store(in: &cancelToken)
-    }
-
-    func react(toNew: U.UpstreamModel) { upstream.react(toNew: toNew) }
-    func react(toNew: U.UpstreamModel, withPrevious: U.UpstreamModel) { upstream.react(toNew: toNew, withPrevious: withPrevious) }
-}
-
-
-///Concrete Type which allows us to realize the familiar covariant functor
-struct Mapped<U: ReactiveElement,V>: ReactiveElement {
-    typealias Model = V
-    typealias UpstreamModel = U.UpstreamModel
-    
-    let state: Signal<Model>
-    let upstream: U
-
-    private var cancelToken = Set<AnyCancellable>()
-    
-    init(_ upstream: U, map: (U.Model) -> V) {
-        self.upstream = upstream
-        let mappedCurrent = upstream.state.currentValue.flatMap{ map($0) }
-        let mappedPrevious = upstream.state.previousValue.flatMap{ map($0) }
-        state = Signal<Model>(current: mappedCurrent, previous: mappedPrevious)
-        
-//        let fire: (U.Model) -> () = {
-//            self.state.update(map($0))
-//        }
-        
-//        upstream.state
-//            .sink{ fire($0.new) }
-//            .store(in: &cancelToken)
-            //Do NOT send this event to the global store, since it will only matter when a downstream subscriber receives it
-    }
-    
-    func react(toNew: U.UpstreamModel) { self.upstream.react(toNew: toNew) }
-    func react(toNew: U.UpstreamModel, withPrevious: U.UpstreamModel) { upstream.react(toNew: toNew, withPrevious: withPrevious) }
 }
 
 precedencegroup ReactiveStreamPrecedence {
@@ -174,13 +95,8 @@ precedencegroup ReactiveStreamPrecedence {
 
 infix operator ~>>: ReactiveStreamPrecedence
 
-//Let's see if we can cut out the wrapping structs with Combine types. I think AnyPublisher<> can get me there with the right signature specializations.
-
-// I didn't class constrain the ReactiveElement protocol, so I'm assuming that you are managing the lifecycle of the type you're passing into a stream. However Signal<T> is a class, so I can work with reference semantics
-//Perhaps Signal<T> just needs to expose a store for cancellable tokens or a store for upstream/downstream Signal references? Some interesting ARC consequences here.
-
 ///Join two reactive elements together
-func ~>> <S: ReactiveElement, C: ReactiveElement>(lhs: S, rhs: C) -> Signal<C.Model> where S.Model == C.UpstreamModel {
+func ~>> <S: ReactiveComponent, C: ReactiveComponent>(lhs: S, rhs: C) -> Signal<C.Model> where S.Model == C.UpstreamModel {
     lhs.state.sink{ event in
         rhs.react(toNew: event.new)
         event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
@@ -190,14 +106,14 @@ func ~>> <S: ReactiveElement, C: ReactiveElement>(lhs: S, rhs: C) -> Signal<C.Mo
     return rhs.state
 }
 
-func ~>> <S: ReactiveElement, C: ReactiveElement>(lhs:S, rhs: C) -> Signal<(S.Model, C.Model)> { //cant constrain with !=, so let's try the cascade of compiler preferring the _most_ specialized signature over the less and see if this now works for two ReactiveElements without a common upstream/downstream model.
-    //problem with that would be that you'd get tupples instead of a compiler error when doing a mismatch now
-    
-}
-//Otherwise we could try a similar operator like <~> 
+//func ~>> <S: ReactiveComponent, C: ReactiveComponent>(lhs:S, rhs: C) -> Signal<(S.Model, C.Model)> { //cant constrain with !=, so let's try the cascade of compiler preferring the _most_ specialized signature over the less and see if this now works for two ReactiveElements without a common upstream/downstream model.
+//    //problem with that would be that you'd get tupples instead of a compiler error when doing a mismatch now
+//
+//}
+//Otherwise we could try a similar operator like <~>
 
 
-func ~>> <S,C: ReactiveElement>(lhs: Signal<S>, rhs: C) -> Signal<C.Model> where S == C.UpstreamModel {
+func ~>> <S,C: ReactiveComponent>(lhs: Signal<S>, rhs: C) -> Signal<C.Model> where S == C.UpstreamModel {
     lhs.sink{ event in
         rhs.react(toNew: event.new)
         event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
@@ -207,60 +123,22 @@ func ~>> <S,C: ReactiveElement>(lhs: Signal<S>, rhs: C) -> Signal<C.Model> where
     return rhs.state
 }
 
-func ~>> <S: ReactiveElement, C: ReactiveRenderer>(lhs: S, rhs: C) -> C.Output where S.Model == C.UpstreamModel {
+func ~>> <S: ReactiveComponent, C: ReactiveRenderer>(lhs: S, rhs: C) -> C where S.Model == C.UpstreamModel {
     lhs.state.sink{ event in
         rhs.react(toNew: event.new)
         event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
     }
     .store(in: &lhs.state.observations)
     
-    return rhs.output
+    return rhs
 }
 
-func ~>> <S,C: ReactiveRenderer>(lhs: Signal<S>, rhs: C) -> C.Output where S == C.UpstreamModel {
+func ~>> <S,C: ReactiveRenderer>(lhs: Signal<S>, rhs: C) -> C where S == C.UpstreamModel {
     lhs.sink{ event in
         rhs.react(toNew: event.new)
         event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
     }
     .store(in: &lhs.observations)
     
-    return rhs.output
+    return rhs
 }
-
-//Now do map, combineLatest & Redux. Then test this approach with a playground.
-
-
-/////Join two reactive elements together
-//func ~>> <S: ReactiveElement, C: ReactiveElement, R: ReactiveElement>(lhs: S, rhs: C) -> R where S.Model == C.UpstreamModel, R.Model == C.Model, R.UpstreamModel == S.UpstreamModel {
-//    return Composite(lhs, downstream: rhs) as! R
-//}
-//
-/////Use a map to transform the published model of a ReactiveElement
-//func ~>> <Source: ReactiveElement, Output: ReactiveElement,T,V>(lhs: Source, rhs: @escaping (T) -> V) -> Output where Source.Model == T, Output.Model == V {
-//    return Mapped(lhs, map: rhs) as! Output
-//}
-//
-/////Subscribe a terminating element to a reactive stream, returning the reified output.
-//func ~>> <Source: ReactiveElement, Renderer: ReactiveRenderer>(lhs: Source, rhs: Renderer) -> Renderer.Output where Source.Model == Renderer.UpstreamModel {
-//    lhs.state.sink{ event in
-//        rhs.react(toNew: event.new)
-//        event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
-//
-//        //send this to the global store
-//    }
-//    //TODO: store the AnyCancellable in an appropriate place
-//
-//    return rhs.output
-//}
-
-
-
-
-
-
-
-//  <Done!> 1. Make a DiffableValueSubject that does the CurrentValueSubject dance but holds the previous state too. This guy will get used everywhere!
-
-// 2. Global implicit redux store
-
-// 3. zip, combineLatest, (U,V,X) etc...
