@@ -106,13 +106,6 @@ func ~>> <S: ReactiveComponent, C: ReactiveComponent>(lhs: S, rhs: C) -> Signal<
     return rhs.state
 }
 
-//func ~>> <S: ReactiveComponent, C: ReactiveComponent>(lhs:S, rhs: C) -> Signal<(S.Model, C.Model)> { //cant constrain with !=, so let's try the cascade of compiler preferring the _most_ specialized signature over the less and see if this now works for two ReactiveElements without a common upstream/downstream model.
-//    //problem with that would be that you'd get tupples instead of a compiler error when doing a mismatch now
-//
-//}
-//Otherwise we could try a similar operator like <~>
-
-
 func ~>> <S,C: ReactiveComponent>(lhs: Signal<S>, rhs: C) -> Signal<C.Model> where S == C.UpstreamModel {
     lhs.sink{ event in
         rhs.react(toNew: event.new)
@@ -142,3 +135,14 @@ func ~>> <S,C: ReactiveRenderer>(lhs: Signal<S>, rhs: C) -> C where S == C.Upstr
     
     return rhs
 }
+
+
+
+//func combineStreams<J: ReactiveComponent, K: ReactiveComponent>(first: J, second: K) -> Signal<(J.Model, K.Model)> {
+//
+//    ///current & previous model snipping needs to happen here. Possible combinatorial explosion of arguments and cases, let's think about it a bit in the abstract and in what a user would expect to happen. Especially given that users would be justified to expect combining streams together in various states of initial/flowing status. ie. joining two un-initialized streams together, or two already flowing ones, or mixtures; up to the airity of combine I'm going to support.
+//
+//    let current = (first.state.currentValue, second.state.currentValue)
+//    let previous = (first.state.previousValue, second.state.previousValue)
+//    return Signal<(J.Model, K.Model)>(current: current, previous: previous)
+//}
