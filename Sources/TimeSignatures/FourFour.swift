@@ -47,9 +47,10 @@ final class Signal<T>: Publisher {
     deinit {
         subscribers.forEach{ $0.receive(completion: .finished) }
         subscribers = []
+        observations.removeAll()
     }
     
-    fileprivate let observations = Set<AnyCancellable>()
+    fileprivate var observations = Set<AnyCancellable>()
 }
 
 protocol ReactiveElement {
@@ -180,48 +181,77 @@ infix operator ~>>: ReactiveStreamPrecedence
 
 ///Join two reactive elements together
 func ~>> <S: ReactiveElement, C: ReactiveElement>(lhs: S, rhs: C) -> Signal<C.Model> where S.Model == C.UpstreamModel {
-
-    
-    return rhs.state
-}
-
-func ~>> <S,C: ReactiveElement>(lhs: Signal<S>, rhs: C) -> Signal<C.Model> where S == C.UpstreamModel {
-    
-    
-    
-    return rhs.state
-}
-
-func ~>> <S,C: ReactiveRenderer>(lhs: Signal<S>, rhs: C) -> C.Output where S == C.UpstreamModel {
-    
-    
-    
-    return rhs.output
-}
-
-
-///Join two reactive elements together
-func ~>> <S: ReactiveElement, C: ReactiveElement, R: ReactiveElement>(lhs: S, rhs: C) -> R where S.Model == C.UpstreamModel, R.Model == C.Model, R.UpstreamModel == S.UpstreamModel {
-    return Composite(lhs, downstream: rhs) as! R
-}
-
-///Use a map to transform the published model of a ReactiveElement
-func ~>> <Source: ReactiveElement, Output: ReactiveElement,T,V>(lhs: Source, rhs: @escaping (T) -> V) -> Output where Source.Model == T, Output.Model == V {
-    return Mapped(lhs, map: rhs) as! Output
-}
-
-///Subscribe a terminating element to a reactive stream, returning the reified output.
-func ~>> <Source: ReactiveElement, Renderer: ReactiveRenderer>(lhs: Source, rhs: Renderer) -> Renderer.Output where Source.Model == Renderer.UpstreamModel {
     lhs.state.sink{ event in
         rhs.react(toNew: event.new)
         event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
-
-        //send this to the global store
     }
-    //TODO: store the AnyCancellable in an appropriate place
+    .store(in: &rhs.state.observations)
+    
+    return rhs.state
+}
 
+func ~>> <S: ReactiveElement, C: ReactiveElement>(lhs:S, rhs: C) -> Signal<(S.Model, C.Model)> { //cant constrain with !=, so let's try the cascade of compiler preferring the _most_ specialized signature over the less and see if this now works for two ReactiveElements without a common upstream/downstream model.
+    //problem with that would be that you'd get tupples instead of a compiler error when doing a mismatch now
+    
+}
+//Otherwise we could try a similar operator like <~> 
+
+
+func ~>> <S,C: ReactiveElement>(lhs: Signal<S>, rhs: C) -> Signal<C.Model> where S == C.UpstreamModel {
+    lhs.sink{ event in
+        rhs.react(toNew: event.new)
+        event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
+    }
+    .store(in: &rhs.state.observations)
+    
+    return rhs.state
+}
+
+func ~>> <S: ReactiveElement, C: ReactiveRenderer>(lhs: S, rhs: C) -> C.Output where S.Model == C.UpstreamModel {
+    lhs.state.sink{ event in
+        rhs.react(toNew: event.new)
+        event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
+    }
+    .store(in: &lhs.state.observations)
+    
     return rhs.output
 }
+
+func ~>> <S,C: ReactiveRenderer>(lhs: Signal<S>, rhs: C) -> C.Output where S == C.UpstreamModel {
+    lhs.sink{ event in
+        rhs.react(toNew: event.new)
+        event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
+    }
+    .store(in: &lhs.observations)
+    
+    return rhs.output
+}
+
+//Now do map, combineLatest & Redux. Then test this approach with a playground.
+
+
+/////Join two reactive elements together
+//func ~>> <S: ReactiveElement, C: ReactiveElement, R: ReactiveElement>(lhs: S, rhs: C) -> R where S.Model == C.UpstreamModel, R.Model == C.Model, R.UpstreamModel == S.UpstreamModel {
+//    return Composite(lhs, downstream: rhs) as! R
+//}
+//
+/////Use a map to transform the published model of a ReactiveElement
+//func ~>> <Source: ReactiveElement, Output: ReactiveElement,T,V>(lhs: Source, rhs: @escaping (T) -> V) -> Output where Source.Model == T, Output.Model == V {
+//    return Mapped(lhs, map: rhs) as! Output
+//}
+//
+/////Subscribe a terminating element to a reactive stream, returning the reified output.
+//func ~>> <Source: ReactiveElement, Renderer: ReactiveRenderer>(lhs: Source, rhs: Renderer) -> Renderer.Output where Source.Model == Renderer.UpstreamModel {
+//    lhs.state.sink{ event in
+//        rhs.react(toNew: event.new)
+//        event.previous.flatMap{ rhs.react(toNew: event.new, withPrevious: $0) }
+//
+//        //send this to the global store
+//    }
+//    //TODO: store the AnyCancellable in an appropriate place
+//
+//    return rhs.output
+//}
 
 
 
