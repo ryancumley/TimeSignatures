@@ -62,6 +62,66 @@ final class Signal<T>: Publisher {
     fileprivate var observations = Set<AnyCancellable>()
 }
 
+fileprivate final class MergeSignal<T,U>: Publisher, Subscriber {
+    //Subscriber Conformance
+    typealias Input = Event<U>
+    func receive(completion: Subscribers.Completion<Never>) {
+        //propagate a completion downstream?
+    }
+    
+    func receive(_ input: Event<U>) -> Subscribers.Demand {
+        //in the operator impl,
+        
+        return .unlimited
+    }
+    
+    func receive(subscription: Subscription) {
+            //I don't think there's any input or sanitization needed here.
+    }
+
+    //Publisher conformance
+    typealias Output = Event<T>
+    typealias Failure = Never
+
+    private var subscribers: Array<AnySubscriber<Event<T>, Never>> = []
+    func receive<S>(subscriber: S) where S : Subscriber, Never == S.Failure, Event<T> == S.Input { subscribers.append(AnySubscriber(subscriber)) }
+
+    //So I can probably `private` hide all the internals here, because nobody outside this file is going to see or call thse things, And I can AnyPublisher erase my output
+    private(set) var currentValue: T?
+    private(set) var previousValue: T?
+
+    //Can probably just directly invoke this on the subscription to the upstream model
+    private func update(_ newValue: T) {
+        let event = Event<T>(new: newValue, previous: currentValue)
+
+        subscribers.enumerated().forEach{
+            let demand = $0.element.receive(event)
+            if demand == .none, demand.max == 0 {
+                $0.element.receive(completion: .finished)
+                subscribers.remove(at: $0.offset)
+            }
+        }
+
+        self.previousValue = self.currentValue
+        self.currentValue = newValue
+    }
+
+    
+    //So we don't need to initialize off of values, we need to initialize somehow off type signatures and let the `<~>` operator do the work to plumb things together. And rememeber, the details of how we do this will all be here in this file and not visible to users of the framework.
+    init(current: T? = nil, previous: T? = nil) {
+        self.currentValue = current
+        self.previousValue = previous
+    }
+
+    deinit {
+        subscribers.forEach{ $0.receive(completion: .finished) }
+        subscribers = []
+        observations.removeAll()
+    }
+
+    fileprivate var observations = Set<AnyCancellable>()
+}
+
 ///The foundational unit of composition for a reactive system, a `ReactiveComponent` defines & publishes a stream of `Event<Model>`'s; and optionally defines an upstream `Event<Model>` which it subscribes to, as well as how to react to publications of that upstream `Event<Model>`
 ///
 ///You may use ReactiveComponent as the beginning/origin of a stream by declaring `typealias UpstreamModel = ()`, which makes your component satisfy the "Publisher" component spec from RSS. If both `Model` and `UpstreamModel` are defined, then your component satisfies the `Processor` component spec from RSS, and can be thought of as fitting into the "Middle" of a stream.
@@ -145,34 +205,42 @@ func ~>> <S,C: ReactiveRenderer>(lhs: Signal<S>, rhs: C) -> C where S == C.Upstr
     return rhs
 }
 
+fileprivate struct MergeStreamComponent<U,D>: ReactiveComponent {
+    typealias Model = D
+    var state = Signal<D>()
+    typealias UpstreamModel = U
+    
+    init(upstream: AnyPublisher<U,Never>, downstream: D.Type) {
+        //Have to instantiante our downstream signal right here
+    }
+    
+    
+    func react(toNew: UpstreamModel) {
+        
+    }
+    
+    func react(toNew: UpstreamModel, withPrevious: UpstreamModel){
+        
+    }
+}
+
 infix operator <~>: CombineReactiveStreamPrecedence
 
 func <~><J: ReactiveComponent, K: ReactiveComponent>(first: J, second: K) -> Signal<(J.Model?, K.Model?)> {
-
-    ///current & previous model snipping needs to happen here. Possible combinatorial explosion of arguments and cases, let's think about it a bit in the abstract and in what a user would expect to happen. Especially given that users would be justified to expect combining streams together in various states of initial/flowing status. ie. joining two un-initialized streams together, or two already flowing ones, or mixtures; up to the airity of combine I'm going to support.
-    
-    //So as a consumer, what do these tupple values look like for me?
-    //Signal's can have nil current & previous values, but always emit Event's with at least the currentValue populated.
-    //So my typeChecking problem here is that arbitrary elements of the tupple may be nil, or have a value
-    
-    //Do I punt this on to the caller by making them treat each element of the tupple as optional?
-
     let current = (first.state.currentValue, second.state.currentValue)
     let previous = (first.state.previousValue, second.state.previousValue)
     let signal = Signal<(J.Model?, K.Model?)>(current: current, previous: previous)
     
+    // the ~>> operator erases stream pairings down to Signal<T>'s, so that's the raw input I'll expect to my operator
+    //if I create the MergeSignal instance here and return it's Signal, we'll have no ARC owner; so... gotta solve that.
+    
+    
     //and now we need to CombineLatest to fire our new Signal
+    //So if Signa<T> fileprivate conformed to Subscriber, could I upstream the newly created Signal instance here to just combineLatest?
+    //Let's try it out!
+
     
     return signal
-    //So does the unsatisfying feeling of this derive from the structural reality of combining streams? It is completely valid that one of the upstream components may be initialized with no values, and never emit one, and we'd still want the combineLatest to fire those values.
-    
-    
-    //(<nil,nil>, <nil,nil>)
-    //(<v, nil>, <nil,nil>)
-    //(<t, v>, <nil,nil>)
-    //(<v, nil>, <w,x>)
-    //These are all totally valid upstream states of a component which is collecting multiple streams.
-    //And we're not stuck in an optional world now, because the combining component publishes any kind of model it wants, only when it wants to. So the nils can be ignored/swallowed if that's the right behavior.
 }
 
 struct UserService: ReactiveComponent {
